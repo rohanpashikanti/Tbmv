@@ -13,6 +13,10 @@
 # production
 /build
 
+# firebase
+.firebase/
+.firebaserc.local
+
 # misc
 .DS_Store
 *.pem

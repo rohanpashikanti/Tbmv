@@ -3,63 +3,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Document ID: {userId} (matches Firebase Auth UID)
-    // Fields:
-    //   - uid: string (required, immutable) - Auth UID
-    //   - phoneNumber: string (optional, max 15 chars) - User mobile
-    //   - name: string (optional, max 100 chars) - Full name
-    //   - email: string (optional, max 100 chars) - Email address
-    //   - role: string (required) - 'CUSTOMER' | 'VENDOR' | 'ADMIN'
-    //   - status: string (required) - 'ACTIVE' | 'SUSPENDED'
-    //   - createdAt: timestamp (required, immutable)
-    //   - updatedAt: timestamp (required)
-    //
-    // Collection: venues
-    // Document ID: {venueId}
-    // Fields:
-    //   - vendorId: string (required, immutable) - Vendor UID
-    //   - name: string (required, max 150 chars) - Venue name
-    //   - category: string (required) - Venue category
-    //   - city: string (required, max 50 chars) - City
-    //   - address: string (required, max 250 chars) - Physical location
-    //   - pricePerHour: number (required, positive)
-    //   - featured: bool (required)
-    //   - status: string (required) - 'ACTIVE' | 'PAUSED' | 'CLOSED'
-    //
-    // Collection: bookings
-    // Document ID: {bookingId}
-    // Fields:
-    //   - bookingNumber: string (required, max 20 chars)
-    //   - userId: string (required, immutable) - Customer UID
-    //   - venueId: string (required, immutable) - Venue ID
-    //   - resourceId: string (required)
-    //   - date: string (required)
-    //   - startTime: string (required)
-    //   - endTime: string (required)
-    //   - totalAmount: number (required, positive)
-    //   - status: string (required) - 'CONFIRMED' | 'CANCELLED' | 'COMPLETED' | 'REFUNDED'
-    //   - checkInState: string (required) - 'PENDING' | 'CHECKED_IN'
-    //
-    // ===============================================================
-
-    // ===============================================================
     // Helper Functions
-    // ===============================================================
     function isAuthenticated() {
       return request.auth != null;
     }
 
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
-    }
-
-    function isDocOwner() {
-      return isAuthenticated() && request.auth.uid == resource.data.uid;
     }
 
     function uidUnchanged() {
@@ -74,17 +24,11 @@ service cloud.firestore {
       return request.resource.data.keys().hasAll(fields);
     }
 
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
     function areImmutableFieldsUnchanged(fields) {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
     }
 
-    // ===============================================================
     // Domain Validators
-    // ===============================================================
     function isValidUser(data) {
       return hasRequiredFields(['uid', 'role', 'status']) &&
              data.uid is string && data.uid.size() > 0 &&
@@ -101,11 +45,7 @@ service cloud.firestore {
              data.status in ['CONFIRMED', 'CANCELLED', 'COMPLETED', 'REFUNDED'];
     }
 
-    // ===============================================================
-    // Collection Rules
-    // ===============================================================
-
-    // Users collection: Private PII data - Owner only access
+    // Users collection: Private user documents
     match /users/{userId} {
       allow read: if isOwner(userId);
       allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data) && uidUnchanged() && request.resource.data.role == 'CUSTOMER';

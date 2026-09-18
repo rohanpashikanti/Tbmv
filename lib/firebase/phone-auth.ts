@@ -15,29 +15,44 @@ declare global {
 }
 
 /**
- * Initializes or retrieves the Firebase reCAPTCHA verifier.
- * @param containerId The DOM element ID or button ID to attach the verifier to.
+ * Initializes or resets the Firebase reCAPTCHA verifier safely.
+ * Cleans up any prior rendered instances to prevent "reCAPTCHA has already been rendered" error.
+ * @param containerId The DOM element ID to attach the verifier to.
  */
-export function getRecaptchaVerifier(containerId: string = "recaptcha-container"): RecaptchaVerifier {
+export function getRecaptchaVerifier(containerId: string = "recaptcha-verifier-container"): RecaptchaVerifier {
   if (typeof window === "undefined") {
     throw new Error("reCAPTCHA verifier can only be initialized in the browser.");
   }
 
+  // Clear existing verifier if any
   if (window.recaptchaVerifier) {
     try {
       window.recaptchaVerifier.clear();
     } catch {
       // Ignore if already cleared
     }
+    delete window.recaptchaVerifier;
+  }
+
+  // Clear container DOM to prevent duplicate iframe rendering
+  const container = document.getElementById(containerId);
+  if (container) {
+    container.innerHTML = "";
   }
 
   window.recaptchaVerifier = new RecaptchaVerifier(auth, containerId, {
     size: "invisible",
     callback: () => {
-      // reCAPTCHA solved - will allow signInWithPhoneNumber
+      // reCAPTCHA solved
     },
     "expired-callback": () => {
-      console.warn("[Firebase Phone Auth] reCAPTCHA expired. User must solve it again.");
+      console.warn("[Firebase Phone Auth] reCAPTCHA expired. Resetting...");
+      if (window.recaptchaVerifier) {
+        try {
+          window.recaptchaVerifier.clear();
+        } catch {}
+        delete window.recaptchaVerifier;
+      }
     },
   });
 
@@ -59,7 +74,7 @@ export interface SendFirebaseOtpResult {
  */
 export async function sendFirebasePhoneOtp(
   rawPhone: string,
-  recaptchaContainerId: string = "recaptcha-container"
+  recaptchaContainerId: string = "recaptcha-verifier-container"
 ): Promise<SendFirebaseOtpResult> {
   const norm = normalizeIndianPhone(rawPhone);
   const logInfo = getSafePhoneLogDetails(rawPhone);
@@ -85,10 +100,33 @@ export async function sendFirebasePhoneOtp(
       formattedPhone: norm.phone,
     };
   } catch (err: any) {
-    console.error(`[Firebase Phone Auth] signInWithPhoneNumber error: ${err.message}`);
+    console.error(`[Firebase Phone Auth] signInWithPhoneNumber error: [${err.code}] ${err.message}`);
+
+    // Clean up verifier on error so subsequent attempts start fresh
+    if (typeof window !== "undefined" && window.recaptchaVerifier) {
+      try {
+        window.recaptchaVerifier.clear();
+      } catch {}
+      delete window.recaptchaVerifier;
+    }
+
+    let userMessage = err.message || "Failed to dispatch verification code. Please try again.";
+
+    if (err.code === "auth/operation-not-allowed") {
+      userMessage = "Phone Authentication is not enabled in your Firebase Console. Please go to Firebase Console -> Authentication -> Sign-in method and enable 'Phone'.";
+    } else if (err.code === "auth/too-many-requests") {
+      userMessage = "Too many SMS requests. Please wait a few minutes before trying again or use a test phone number in Firebase Console.";
+    } else if (err.code === "auth/invalid-phone-number") {
+      userMessage = "The phone number entered is invalid. Please enter a valid 10-digit Indian mobile number.";
+    } else if (err.code === "auth/captcha-check-failed") {
+      userMessage = "reCAPTCHA verification failed. Please try sending again.";
+    } else if (err.code === "auth/quota-exceeded") {
+      userMessage = "SMS quota exceeded for this Firebase project. Enable Blaze plan or configure Test Phone Numbers in Firebase Console.";
+    }
+
     return {
       success: false,
-      error: err.message || "Failed to dispatch verification code. Please try again.",
+      error: userMessage,
     };
   }
 }
@@ -142,11 +180,13 @@ export async function verifyFirebasePhoneOtp(
       },
     };
   } catch (err: any) {
-    console.error(`[Firebase Phone Auth] verify OTP error: ${err.message}`);
+    console.error(`[Firebase Phone Auth] verify OTP error: [${err.code}] ${err.message}`);
     return {
       success: false,
       error: err.code === "auth/invalid-verification-code"
         ? "Invalid verification code. Please check and try again."
+        : err.code === "auth/code-expired"
+        ? "The verification code has expired. Please request a new one."
         : err.message || "Failed to verify OTP code.",
     };
   }
