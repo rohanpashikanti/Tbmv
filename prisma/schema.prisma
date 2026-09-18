@@ -43,6 +43,21 @@ enum AccountStatus {
   DISABLED
 }
 
+enum KycStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+enum VenueStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  PAUSED
+  REJECTED
+}
+
 model User {
   id          String        @id @default(uuid())
   authUserId  String?       @unique
@@ -57,45 +72,70 @@ model User {
 
   bookings  Booking[]
   holds     BookingHold[]
+  vendor    Vendor?
 
   @@index([email])
   @@index([phone])
 }
 
+model Vendor {
+  id             String        @id @default(uuid())
+  userId         String        @unique
+  businessName   String
+  contactName    String
+  email          String
+  phone          String
+  kycStatus      KycStatus     @default(PENDING)
+  commissionRate Decimal       @default(0.05) @db.Decimal(5, 4)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venues         Venue[]
+
+  @@index([kycStatus])
+  @@index([userId])
+}
+
 model Venue {
-  id              String               @id @default(uuid())
-  slug            String               @unique
-  name            String
-  tagline         String?
-  description     String
-  category        String               // cricket, football, private-theatre, etc.
-  address         String
-  city            String
-  neighborhood    String
-  distanceKm      Float                @default(0.0)
-  latitude        Float?
-  longitude       Float?
-  timezone        String               @default("Asia/Kolkata")
-  rating          Float                @default(5.0)
-  reviewCount     Int                  @default(0)
-  startingPrice   Decimal              @db.Decimal(10, 2)
-  priceUnit       String               @default("hour")
-  isAvailableToday Boolean             @default(true)
-  isPopular       Boolean              @default(false)
-  isTrending      Boolean              @default(false)
-  images          String[]
-  amenities       Json                 // Array of { id, name, icon }
-  rules           String[]
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  id               String               @id @default(uuid())
+  vendorId         String?
+  slug             String               @unique
+  name             String
+  tagline          String?
+  description      String
+  category         String               // cricket, football, private-theatre, etc.
+  address          String
+  city             String
+  neighborhood     String
+  distanceKm       Float                @default(0.0)
+  latitude         Float?
+  longitude        Float?
+  timezone         String               @default("Asia/Kolkata")
+  rating           Float                @default(5.0)
+  reviewCount      Int                  @default(0)
+  startingPrice    Decimal              @db.Decimal(10, 2)
+  priceUnit        String               @default("hour")
+  status           VenueStatus          @default(PUBLISHED)
+  isAvailableToday Boolean              @default(true)
+  isPopular        Boolean              @default(false)
+  isTrending       Boolean              @default(false)
+  images           String[]
+  amenities        Json                 // Array of { id, name, icon }
+  rules            String[]
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
 
-  resources       VenueResource[]
-  blockedPeriods  VenueBlockedPeriod[]
-  bookings        Booking[]
+  vendor           Vendor?              @relation(fields: [vendorId], references: [id])
+  resources        VenueResource[]
+  blockedPeriods   VenueBlockedPeriod[]
+  bookings         Booking[]
 
+  @@index([vendorId])
   @@index([city])
   @@index([category])
   @@index([slug])
+  @@index([status])
 }
 
 model VenueResource {
@@ -114,6 +154,7 @@ model VenueResource {
   bookingItems     BookingItem[]
   holds            BookingHold[]
   blockedPeriods   VenueBlockedPeriod[]
+  occupancies      InventoryOccupancy[]
 
   @@index([venueId])
   @@index([category])
@@ -211,12 +252,28 @@ model BookingItem {
   booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
   resource    VenueResource @relation(fields: [resourceId], references: [id])
 
-  // Compound unique fallback and indexes
-  // NOTE: PostgreSQL EXCLUDE USING gist (resourceId WITH =, tsrange(startUtc, endUtc, '[)') WITH &&)
-  // is applied via PostgreSQL migration to guarantee zero arbitrary overlapping intervals.
   @@index([resourceId, date])
   @@index([bookingId])
   @@index([resourceId, startUtc, endUtc])
+}
+
+model InventoryOccupancy {
+  id             String        @id @default(uuid())
+  resourceId     String
+  venueId        String
+  occupancyType  String        // HOLD, BOOKING, VENDOR_BLOCK, MAINTENANCE
+  referenceId    String        // bookingId, holdId, or blockId
+  startUtc       DateTime
+  endUtc         DateTime
+  status         String        @default("ACTIVE") // ACTIVE, RELEASED
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  resource       VenueResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([resourceId, startUtc, endUtc])
+  @@index([referenceId])
+  @@index([status])
 }
 
 model Payment {
@@ -253,6 +310,41 @@ model VenueBlockedPeriod {
   resource    VenueResource? @relation(fields: [resourceId], references: [id], onDelete: Cascade)
 
   @@index([venueId, startDate, endDate])
+}
+
+model PayoutLedger {
+  id                String        @id @default(uuid())
+  bookingId         String        @unique
+  venueId           String
+  vendorId          String
+  grossAmount       Decimal       @db.Decimal(10, 2)
+  platformFeeRate   Decimal       @db.Decimal(5, 4)
+  platformFeeAmount Decimal       @db.Decimal(10, 2)
+  taxAmount         Decimal       @db.Decimal(10, 2)
+  netVendorAmount   Decimal       @db.Decimal(10, 2)
+  status            String        @default("PENDING_SETTLEMENT") // PENDING_SETTLEMENT, SETTLED, REFUND_ADJUSTED
+  settlementDate    DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([vendorId])
+  @@index([venueId])
+  @@index([status])
+}
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  actorId     String
+  actorRole   String
+  action      String
+  targetId    String
+  targetType  String
+  metadata    Json
+  createdAt   DateTime  @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([targetType, targetId])
 }
 
 model BookingEvent {

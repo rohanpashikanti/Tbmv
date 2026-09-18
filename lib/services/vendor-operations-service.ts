@@ -2,6 +2,7 @@ import { postgresBookingService, TimeInterval, parseVenueTimeToUtc, doIntervalsO
 import { realtimeEventBus } from "./event-bus";
 import { VENUES } from "@/lib/mock-data";
 import { SlotState, SlotStateType } from "@/types/booking-state";
+import { prisma } from "@/lib/prisma";
 
 export type UserRole = "CUSTOMER" | "VENDOR" | "ADMIN";
 
@@ -99,8 +100,8 @@ export class VendorOperationsService {
   }
 
   private seedInitialData() {
-    // Seed default vendor
-    const defaultVendor: VendorAccount = {
+    // Seed default vendors
+    const defaultVendor1: VendorAccount = {
       id: "vendor-1",
       userId: "user-vendor-1",
       businessName: "CGI Sports & Entertainment Ltd",
@@ -109,10 +110,24 @@ export class VendorOperationsService {
       phone: "+91 98765 00001",
       kycStatus: "APPROVED",
       commissionRate: 0.05,
-      venueIds: ["venue-1", "venue-2", "venue-3"],
+      venueIds: ["venue-1", "venue-2"],
       createdAt: "2026-01-01T00:00:00.000Z",
     };
-    this.vendorAccounts.set(defaultVendor.id, defaultVendor);
+    this.vendorAccounts.set(defaultVendor1.id, defaultVendor1);
+
+    const defaultVendor2: VendorAccount = {
+      id: "vendor-2",
+      userId: "user-vendor-2",
+      businessName: "Skyline Entertainment Ltd",
+      contactName: "Suresh Pillai",
+      email: "partner@skyline.in",
+      phone: "+91 98765 00002",
+      kycStatus: "APPROVED",
+      commissionRate: 0.05,
+      venueIds: ["venue-3"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    this.vendorAccounts.set(defaultVendor2.id, defaultVendor2);
 
     // Initial venue statuses
     this.venueStatuses.set("venue-1", "PUBLISHED");
@@ -172,8 +187,20 @@ export class VendorOperationsService {
   validateVendorOwnership(auth: AuthContext, venueId: string): boolean {
     if (auth.role === "ADMIN") return true;
     if (auth.role !== "VENDOR") return false;
+    
+    // Check internal map
     const vendor = this.vendorAccounts.get(auth.vendorId || "");
-    return Boolean(vendor && vendor.venueIds.includes(venueId));
+    if (vendor && vendor.kycStatus === "APPROVED" && vendor.venueIds.includes(venueId)) {
+      return true;
+    }
+
+    // Direct user lookup
+    const vendorByUser = this.getVendorByUserId(auth.userId);
+    if (vendorByUser && vendorByUser.kycStatus === "APPROVED" && vendorByUser.venueIds.includes(venueId)) {
+      return true;
+    }
+
+    return false;
   }
 
   validateAdminRole(auth: AuthContext): boolean {
@@ -181,14 +208,128 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 2. DETERMINISTIC DYNAMIC PRICING ENGINE
-  // Hierarchy: Special Date (50) > Seasonal (40) > Weekend (30) > Peak/Off-Peak (20) > Base (10)
+  // 2. VENDOR LIFECYCLE & ONBOARDING
+  // =========================================================================
+  getVendorByUserId(userId: string): VendorAccount | null {
+    for (const v of this.vendorAccounts.values()) {
+      if (v.userId === userId) return v;
+    }
+    return null;
+  }
+
+  getVendorById(vendorId: string): VendorAccount | null {
+    return this.vendorAccounts.get(vendorId) || null;
+  }
+
+  async applyForVendorAccount(
+    userId: string,
+    data: {
+      businessName: string;
+      contactName: string;
+      email: string;
+      phone: string;
+      venueName?: string;
+    }
+  ): Promise<VendorAccount> {
+    const existing = this.getVendorByUserId(userId);
+    if (existing) {
+      return existing;
+    }
+
+    const vendorId = `ven_${Math.random().toString(36).substring(2, 9)}`;
+    const newVendor: VendorAccount = {
+      id: vendorId,
+      userId,
+      businessName: data.businessName,
+      contactName: data.contactName,
+      email: data.email,
+      phone: data.phone,
+      kycStatus: "PENDING", // Initial state is always PENDING review
+      commissionRate: 0.05,
+      venueIds: [],
+      createdAt: new Date().toISOString(),
+    };
+
+    this.vendorAccounts.set(vendorId, newVendor);
+
+    this.logAudit({
+      actorId: userId,
+      actorRole: "CUSTOMER",
+      action: "VENDOR_APPLICATION_SUBMITTED",
+      targetId: vendorId,
+      targetType: "VENDOR",
+      metadata: { businessName: data.businessName, phone: data.phone },
+    });
+
+    return newVendor;
+  }
+
+  approveVendor(auth: AuthContext, vendorId: string, assignedVenueIds: string[] = []): { success: boolean; message: string } {
+    if (!this.validateAdminRole(auth)) {
+      return { success: false, message: "Unauthorized: Superadmin privileges required." };
+    }
+
+    const vendor = this.vendorAccounts.get(vendorId);
+    if (!vendor) {
+      return { success: false, message: "Vendor not found." };
+    }
+
+    vendor.kycStatus = "APPROVED";
+    if (assignedVenueIds.length > 0) {
+      vendor.venueIds = [...assignedVenueIds];
+    }
+
+    this.logAudit({
+      actorId: auth.userId,
+      actorRole: auth.role,
+      action: "VENDOR_APPROVED",
+      targetId: vendorId,
+      targetType: "VENDOR",
+      metadata: { businessName: vendor.businessName, assignedVenues: vendor.venueIds },
+    });
+
+    return { success: true, message: `Vendor ${vendor.businessName} approved successfully.` };
+  }
+
+  suspendVendor(auth: AuthContext, vendorId: string, reason?: string): { success: boolean; message: string } {
+    if (!this.validateAdminRole(auth)) {
+      return { success: false, message: "Unauthorized: Superadmin privileges required." };
+    }
+
+    const vendor = this.vendorAccounts.get(vendorId);
+    if (!vendor) {
+      return { success: false, message: "Vendor not found." };
+    }
+
+    vendor.kycStatus = "SUSPENDED";
+
+    this.logAudit({
+      actorId: auth.userId,
+      actorRole: auth.role,
+      action: "VENDOR_SUSPENDED",
+      targetId: vendorId,
+      targetType: "VENDOR",
+      metadata: { businessName: vendor.businessName, reason },
+    });
+
+    return { success: true, message: `Vendor ${vendor.businessName} has been suspended.` };
+  }
+
+  getAllVendors(auth: AuthContext): VendorAccount[] {
+    if (!this.validateAdminRole(auth)) {
+      throw new Error("UNAUTHORIZED: Admin privileges required");
+    }
+    return Array.from(this.vendorAccounts.values());
+  }
+
+  // =========================================================================
+  // 3. DETERMINISTIC DYNAMIC PRICING ENGINE
   // =========================================================================
   calculateEffectiveHourlyRate(
     venueId: string,
     resourceId: string,
     dateStr: string,
-    timeStr: string // "HH:mm"
+    timeStr: string
   ): { rate: number; matchedRule: PricingRule | null } {
     const rules = this.pricingRules.get(resourceId) || [];
     const activeRules = rules.filter((r) => r.active && dateStr >= r.effectiveFrom && dateStr <= r.effectiveTo);
@@ -197,7 +338,6 @@ export class VendorOperationsService {
     const dateObj = new Date(Date.UTC(year, month - 1, day));
     const dayOfWeek = dateObj.getUTCDay();
 
-    // Sort by priority descending
     const sortedRules = [...activeRules].sort((a, b) => b.priority - a.priority);
 
     for (const rule of sortedRules) {
@@ -212,7 +352,6 @@ export class VendorOperationsService {
       return { rate: rule.amount, matchedRule: rule };
     }
 
-    // Default to base resource price from mock data
     const venue = VENUES.find((v) => v.id === venueId);
     const res = venue?.resources.find((r) => r.id === resourceId);
     return { rate: res?.basePricePerHour || 1200, matchedRule: null };
@@ -260,8 +399,7 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 3. UNIFIED INVENTORY BLOCKING (Vendor Maintenance / Private Event Block)
-  // Enforces PostgreSQL exclusion and competes with customer holds atomically
+  // 4. UNIFIED INVENTORY BLOCKING (PostgreSQL Enforced)
   // =========================================================================
   async blockSlot(
     auth: AuthContext,
@@ -347,7 +485,7 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 4. VENDOR MANUAL / OFFLINE BOOKINGS
+  // 5. VENDOR MANUAL / OFFLINE BOOKINGS
   // =========================================================================
   async createManualBooking(
     auth: AuthContext,
@@ -369,7 +507,6 @@ export class VendorOperationsService {
       return { success: false, message: "Unauthorized: You do not own this venue." };
     }
 
-    // Convert to hold & confirm in unified Postgres engine
     const holdRes = await postgresBookingService.createHold(
       {
         venueId: params.venueId,
@@ -405,7 +542,6 @@ export class VendorOperationsService {
       return { success: false, message: confirmRes.message || "Could not confirm manual booking." };
     }
 
-    // Record in financial ledger
     this.recordLedgerEntry({
       bookingId: confirmRes.data.id,
       venueId: params.venueId,
@@ -431,7 +567,7 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 5. CHECK-IN STATE MACHINE (CONFIRMED -> CHECKED_IN -> COMPLETED)
+  // 6. CHECK-IN STATE MACHINE (CONFIRMED -> CHECKED_IN -> COMPLETED)
   // =========================================================================
   checkInBooking(
     auth: AuthContext,
@@ -470,7 +606,7 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 6. FINANCIAL & PAYOUT LEDGER
+  // 7. FINANCIAL & PAYOUT LEDGER
   // =========================================================================
   recordLedgerEntry(params: {
     bookingId: string;
@@ -510,7 +646,7 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 7. ADMIN VENUE MODERATION & CONTROLLED REFUNDS
+  // 8. ADMIN MODERATION, COMMISSION & REFUNDS
   // =========================================================================
   moderateVenue(
     auth: AuthContext,
@@ -558,17 +694,14 @@ export class VendorOperationsService {
       return { success: false, message: `Booking is already ${booking.status}.` };
     }
 
-    // 1. Release inventory
     await postgresBookingService.cancelBooking(booking.id);
     booking.status = "REFUNDED";
 
-    // 2. Adjust financial ledger
     const existingLedger = Array.from(this.ledgerEntries.values()).find((l) => l.bookingId === booking.id);
     if (existingLedger) {
       existingLedger.status = "REFUND_ADJUSTED";
     }
 
-    // 3. Log Audit Record
     this.logAudit({
       actorId: auth.userId,
       actorRole: auth.role,
@@ -606,9 +739,9 @@ export class VendorOperationsService {
   }
 
   // =========================================================================
-  // 8. AUDIT LOGGING
+  // 9. AUDIT LOGGING
   // =========================================================================
-  private logAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
+  logAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
     const fullEntry: AuditLogEntry = {
       ...entry,
       id: `aud_${Math.random().toString(36).substring(2, 9)}`,

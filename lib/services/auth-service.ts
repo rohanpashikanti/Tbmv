@@ -1,12 +1,18 @@
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
-import { User, AccountStatus } from "@prisma/client";
+import { User, AccountStatus, Vendor, KycStatus } from "@prisma/client";
 import { postgresBookingService } from "./postgres-booking-service";
 import { vendorOperationsService } from "./vendor-operations-service";
 
+export interface VendorContext {
+  user: User;
+  vendor: Vendor;
+  vendorId: string;
+}
+
 export class AuthService {
   /**
-   * Resolves the current authenticated user from Supabase and our DB.
+   * 1. Resolves the current authenticated user from Supabase SSR and PostgreSQL.
    * Client-submitted role or user headers are NEVER trusted.
    */
   async getCurrentUser(): Promise<User | null> {
@@ -25,14 +31,24 @@ export class AuthService {
         where: { authUserId: supabaseUser.id },
       });
 
+      if (!user && supabaseUser.phone) {
+        user = await prisma.user.findFirst({
+          where: { phone: supabaseUser.phone },
+        });
+        if (user) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: { authUserId: supabaseUser.id },
+          });
+        }
+      }
+
       if (!user && supabaseUser.email) {
-        // Fallback: check if an application user already exists with this email
         user = await prisma.user.findUnique({
           where: { email: supabaseUser.email },
         });
 
         if (user) {
-          // Link the existing application user with the new Supabase Auth user ID
           user = await prisma.user.update({
             where: { id: user.id },
             data: { authUserId: supabaseUser.id },
@@ -41,13 +57,14 @@ export class AuthService {
       }
 
       if (!user) {
-        // Auto-provision application User linked to Supabase Auth user
+        // Auto-provision application User linked to Supabase Auth user (Default role: CUSTOMER)
         user = await prisma.user.create({
           data: {
             authUserId: supabaseUser.id,
-            email: supabaseUser.email || `${supabaseUser.id}@guest.thebookmyvenues.in`,
-            name: supabaseUser.user_metadata?.name || supabaseUser.email?.split("@")[0] || "Customer",
-            role: "CUSTOMER", // Registration always defaults to CUSTOMER
+            email: supabaseUser.email || `${supabaseUser.id.slice(0, 10)}@mobile.thebookmyvenues.in`,
+            name: supabaseUser.user_metadata?.name || "Customer",
+            phone: supabaseUser.phone || null,
+            role: "CUSTOMER",
             status: AccountStatus.ACTIVE,
           },
         });
@@ -60,7 +77,7 @@ export class AuthService {
   }
 
   /**
-   * Ensures the request is authenticated and the account is ACTIVE.
+   * 2. Ensures the request is authenticated and the account is ACTIVE.
    */
   async requireAuth(): Promise<User> {
     const user = await this.getCurrentUser();
@@ -74,7 +91,7 @@ export class AuthService {
   }
 
   /**
-   * Ensures the request is authenticated, ACTIVE, and has the specified role.
+   * 3. Ensures user has the specified role (or ADMIN).
    */
   async requireRole(role: string): Promise<User> {
     const user = await this.requireAuth();
@@ -84,6 +101,9 @@ export class AuthService {
     return user;
   }
 
+  /**
+   * 4. Strict Admin Authorization
+   */
   async requireAdmin(): Promise<User> {
     const user = await this.requireAuth();
     if (user.role !== "ADMIN") {
@@ -92,28 +112,92 @@ export class AuthService {
     return user;
   }
 
-  async requireVendorAccess(venueId?: string): Promise<{ user: User; vendorId: string }> {
+  /**
+   * 5. Strict Vendor Authorization with KYC & Multi-Tenant Venue Ownership Check
+   */
+  async requireVendorAccess(venueId?: string): Promise<VendorContext> {
     const user = await this.requireAuth();
     if (user.role !== "VENDOR" && user.role !== "ADMIN") {
       throw new Error("FORBIDDEN: Vendor access required");
     }
 
-    // Determine vendorId associated with user
-    const vendorId = "vendor-1"; // Default linked vendor entity
+    // Admin has global operational override access
+    if (user.role === "ADMIN") {
+      let adminVendor = await prisma.vendor.findFirst({ where: { userId: user.id } });
+      if (!adminVendor) {
+        adminVendor = {
+          id: "admin-platform-vendor",
+          userId: user.id,
+          businessName: "Platform Admin Master",
+          contactName: user.name,
+          email: user.email,
+          phone: user.phone || "+919999999999",
+          kycStatus: KycStatus.APPROVED,
+          commissionRate: 0.05 as any,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+      }
+      return { user, vendor: adminVendor, vendorId: adminVendor.id };
+    }
 
-    if (venueId && user.role === "VENDOR") {
-      const isOwner = vendorOperationsService.validateVendorOwnership(
-        { userId: user.id, role: "VENDOR", vendorId },
-        venueId
-      );
-      if (!isOwner) {
+    // Lookup Vendor Entity in database
+    let vendor = await prisma.vendor.findUnique({
+      where: { userId: user.id },
+      include: { venues: true },
+    });
+
+    if (!vendor) {
+      // Check in vendorOperationsService fallback registry
+      const memoryVendor = vendorOperationsService.getVendorByUserId(user.id);
+      if (memoryVendor) {
+        if (memoryVendor.kycStatus !== "APPROVED") {
+          throw new Error(`FORBIDDEN: Vendor status is ${memoryVendor.kycStatus}`);
+        }
+        if (venueId && !vendorOperationsService.validateVendorOwnership({ userId: user.id, role: "VENDOR", vendorId: memoryVendor.id }, venueId)) {
+          throw new Error("FORBIDDEN: You do not own this venue");
+        }
+        return {
+          user,
+          vendor: {
+            id: memoryVendor.id,
+            userId: user.id,
+            businessName: memoryVendor.businessName,
+            contactName: memoryVendor.contactName,
+            email: memoryVendor.email,
+            phone: memoryVendor.phone,
+            kycStatus: memoryVendor.kycStatus as any,
+            commissionRate: memoryVendor.commissionRate as any,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          vendorId: memoryVendor.id,
+        };
+      }
+      throw new Error("FORBIDDEN: Vendor account not found or pending approval");
+    }
+
+    // Validate KYC status (Must be APPROVED)
+    if (vendor.kycStatus !== KycStatus.APPROVED) {
+      throw new Error(`FORBIDDEN: Vendor status is ${vendor.kycStatus}`);
+    }
+
+    // Validate Venue Ownership if venueId supplied
+    if (venueId) {
+      const ownsVenue = vendor.venues.some((v) => v.id === venueId) ||
+        vendorOperationsService.validateVendorOwnership({ userId: user.id, role: "VENDOR", vendorId: vendor.id }, venueId);
+      
+      if (!ownsVenue) {
         throw new Error("FORBIDDEN: You do not own this venue");
       }
     }
 
-    return { user, vendorId };
+    return { user, vendor, vendorId: vendor.id };
   }
 
+  /**
+   * 6. Strict Multi-Tenant Booking Ownership Check
+   */
   async requireBookingAccess(bookingId: string): Promise<{ user: User; booking: any }> {
     const user = await this.requireAuth();
     const booking = postgresBookingService.getBooking(bookingId);
@@ -127,15 +211,21 @@ export class AuthService {
     }
 
     if (user.role === "VENDOR") {
-      const isOwner = vendorOperationsService.validateVendorOwnership(
-        { userId: user.id, role: "VENDOR", vendorId: "vendor-1" },
-        booking.venueId
-      );
+      const vendor = await prisma.vendor.findUnique({
+        where: { userId: user.id },
+        include: { venues: true },
+      });
+      const vendorId = vendor?.id || "vendor-1";
+      const isOwner = vendor?.venues.some((v) => v.id === booking.venueId) ||
+        vendorOperationsService.validateVendorOwnership({ userId: user.id, role: "VENDOR", vendorId }, booking.venueId);
+      
       if (isOwner) {
         return { user, booking };
       }
+      throw new Error("FORBIDDEN: Booking belongs to a different vendor");
     }
 
+    // Customer ownership
     if (booking.userId && booking.userId !== user.id) {
       throw new Error("FORBIDDEN: Access denied to other customer bookings");
     }
