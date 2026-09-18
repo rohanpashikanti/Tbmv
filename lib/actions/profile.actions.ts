@@ -1,6 +1,5 @@
 "use server";
 
-import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 import { AccountStatus } from "@prisma/client";
 import { normalizeIndianPhone, getSafePhoneLogDetails } from "@/lib/auth/phone";
@@ -26,42 +25,31 @@ export interface ProfileActionResult<T = any> {
 }
 
 /**
- * Fetch authenticated user profile from Clerk Auth + Prisma PostgreSQL
+ * Fetch user profile from Supabase PostgreSQL
  */
-export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>> {
+export async function getUserProfile(userId?: string): Promise<ProfileActionResult<ProfileData>> {
   try {
-    const { userId } = await auth();
-
     if (!userId) {
       return {
         success: false,
-        error: "Unauthenticated. Please log in to view your profile.",
+        error: "User identifier required.",
       };
     }
 
-    const clerkUser = await currentUser();
-    const primaryEmail = clerkUser?.emailAddresses?.[0]?.emailAddress || "";
-    const primaryPhone = clerkUser?.phoneNumbers?.[0]?.phoneNumber || null;
-    const fullName = [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ") || "Customer";
-
-    let appUser = await prisma.user.findUnique({
-      where: { authUserId: userId },
+    const appUser = await prisma.user.findFirst({
+      where: {
+        OR: [{ authUserId: userId }, { id: userId }, { email: userId }],
+      },
     });
 
     if (!appUser) {
-      appUser = await prisma.user.create({
-        data: {
-          authUserId: userId,
-          phone: primaryPhone,
-          email: primaryEmail || `${userId.slice(0, 8)}@user.thebookmyvenues.in`,
-          name: fullName,
-          role: "CUSTOMER",
-          status: AccountStatus.ACTIVE,
-        },
-      });
+      return {
+        success: false,
+        error: "User not found in database.",
+      };
     }
 
-    const phoneVal = appUser.phone || primaryPhone || "";
+    const phoneVal = appUser.phone || "";
     const safeDetails = getSafePhoneLogDetails(phoneVal);
 
     return {
@@ -75,8 +63,8 @@ export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>
         maskedPhone: safeDetails.masked || "No phone linked",
         role: appUser.role,
         status: appUser.status,
-        isPhoneVerified: Boolean(primaryPhone),
-        isEmailVerified: Boolean(primaryEmail),
+        isPhoneVerified: Boolean(appUser.phone),
+        isEmailVerified: Boolean(appUser.email),
       },
     };
   } catch (err: any) {
@@ -86,19 +74,16 @@ export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>
       error: err.message || "Failed to load user profile.",
     };
   }
-}
-
-/**
+}/**
  * Direct editable fields: Name & Age
  */
 export async function updateGeneralProfile(input: {
+  userId: string;
   name: string;
   age?: number | null;
 }): Promise<ProfileActionResult<{ name: string; age: number | null }>> {
   try {
-    const { userId } = await auth();
-
-    if (!userId) {
+    if (!input.userId) {
       return { success: false, error: "Unauthenticated. Please log in." };
     }
 
@@ -121,7 +106,7 @@ export async function updateGeneralProfile(input: {
 
     // Update in Prisma
     const updated = await prisma.user.update({
-      where: { authUserId: userId },
+      where: { authUserId: input.userId },
       data: {
         name: trimmedName,
         age: parsedAge,
@@ -155,11 +140,11 @@ export async function requestPhoneChange(newPhoneInput: string): Promise<Profile
 }
 
 export async function verifyPhoneChange(
+  userId: string,
   newPhoneInput: string,
   otpToken: string
 ): Promise<ProfileActionResult<{ phone: string; maskedPhone: string }>> {
   try {
-    const { userId } = await auth();
     if (!userId) {
       return { success: false, error: "Unauthenticated. Please log in." };
     }
@@ -195,3 +180,4 @@ export async function requestEmailChange(newEmailInput: string): Promise<Profile
     data: { email: cleanEmail },
   };
 }
+

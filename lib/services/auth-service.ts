@@ -1,4 +1,3 @@
-import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 import { User, AccountStatus, Vendor, KycStatus } from "@prisma/client";
 import { postgresBookingService } from "./postgres-booking-service";
@@ -12,65 +11,19 @@ export interface VendorContext {
 
 export class AuthService {
   /**
-   * 1. Resolves the current authenticated user from Clerk session and PostgreSQL (Prisma).
-   * Client-submitted role or user headers are NEVER trusted.
+   * 1. Resolves user from Supabase PostgreSQL (Prisma).
    */
-  async getCurrentUser(): Promise<User | null> {
+  async getCurrentUser(userId?: string): Promise<User | null> {
     try {
-      const { userId: clerkUserId } = await auth();
-      if (!clerkUserId) {
+      if (!userId) {
         return null;
       }
 
-      let user = await prisma.user.findUnique({
-        where: { authUserId: clerkUserId },
+      const user = await prisma.user.findFirst({
+        where: {
+          OR: [{ authUserId: userId }, { id: userId }, { email: userId }],
+        },
       });
-
-      if (!user) {
-        // Fetch Clerk user details to populate profile
-        const clerkUser = await currentUser();
-        const primaryEmail = clerkUser?.emailAddresses?.[0]?.emailAddress;
-        const primaryPhone = clerkUser?.phoneNumbers?.[0]?.phoneNumber;
-        const fullName = [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ") || "Customer";
-
-        if (primaryEmail) {
-          user = await prisma.user.findUnique({
-            where: { email: primaryEmail },
-          });
-          if (user) {
-            user = await prisma.user.update({
-              where: { id: user.id },
-              data: { authUserId: clerkUserId },
-            });
-          }
-        }
-
-        if (!user && primaryPhone) {
-          user = await prisma.user.findFirst({
-            where: { phone: primaryPhone },
-          });
-          if (user) {
-            user = await prisma.user.update({
-              where: { id: user.id },
-              data: { authUserId: clerkUserId },
-            });
-          }
-        }
-
-        if (!user) {
-          // Auto-provision application User linked to Clerk Auth user (Default role: CUSTOMER)
-          user = await prisma.user.create({
-            data: {
-              authUserId: clerkUserId,
-              email: primaryEmail || `${clerkUserId.slice(0, 10)}@user.thebookmyvenues.in`,
-              name: fullName,
-              phone: primaryPhone || null,
-              role: "CUSTOMER",
-              status: AccountStatus.ACTIVE,
-            },
-          });
-        }
-      }
 
       return user;
     } catch {
@@ -79,10 +32,10 @@ export class AuthService {
   }
 
   /**
-   * 2. Ensures the request is authenticated and the account is ACTIVE.
+   * 2. Ensures the user is resolved and the account is ACTIVE.
    */
-  async requireAuth(): Promise<User> {
-    const user = await this.getCurrentUser();
+  async requireAuth(userId?: string): Promise<User> {
+    const user = await this.getCurrentUser(userId);
     if (!user) {
       throw new Error("UNAUTHORIZED");
     }
@@ -91,6 +44,7 @@ export class AuthService {
     }
     return user;
   }
+
 
   /**
    * 3. Ensures user has the specified role (or ADMIN).
