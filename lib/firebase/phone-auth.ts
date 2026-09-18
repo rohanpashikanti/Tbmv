@@ -112,7 +112,9 @@ export async function sendFirebasePhoneOtp(
 
     let userMessage = err.message || "Failed to dispatch verification code. Please try again.";
 
-    if (err.code === "auth/operation-not-allowed") {
+    if (err.code === "auth/billing-not-enabled") {
+      userMessage = "Firebase requires billing (Blaze plan) to send real SMS messages, or you can add your number under 'Phone numbers for testing' in Firebase Console for free instant testing.";
+    } else if (err.code === "auth/operation-not-allowed") {
       userMessage = "Phone Authentication is not enabled in your Firebase Console. Please go to Firebase Console -> Authentication -> Sign-in method and enable 'Phone'.";
     } else if (err.code === "auth/too-many-requests") {
       userMessage = "Too many SMS requests. Please wait a few minutes before trying again or use a test phone number in Firebase Console.";
