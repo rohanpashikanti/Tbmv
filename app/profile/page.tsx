@@ -16,33 +16,32 @@ import {
   Edit3,
   Calendar,
   LogOut,
-  ArrowRight,
 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth-context";
-import { firestoreService } from "@/lib/firebase/firestore-service";
+import { updateSupabaseUserProfile } from "@/lib/actions/auth.actions";
 
 export default function ProfilePage() {
   const router = useRouter();
-  const { user, userProfile, loading, signOut, refreshProfile } = useFirebaseAuth();
+  const { user, dbUser, loading, signOut, refreshProfile } = useFirebaseAuth();
   const [isPending, startTransition] = useTransition();
 
   // General Profile Edit State
   const [name, setName] = useState("");
   const [age, setAge] = useState<string>("");
-  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [generalMsg, setGeneralMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
     if (!loading) {
       if (!user) {
         router.push("/login?next=/profile");
-      } else if (userProfile) {
-        setName(userProfile.name || "");
-        setAge(userProfile.age ? String(userProfile.age) : "");
-        setEmail(userProfile.email || "");
+      } else {
+        setName(dbUser?.name || user.displayName || "");
+        setAge(dbUser?.age ? String(dbUser.age) : "");
+        setPhone(dbUser?.phone || user.phoneNumber || "");
       }
     }
-  }, [user, userProfile, loading, router]);
+  }, [user, dbUser, loading, router]);
 
   // Handle General Profile Update
   const handleSaveGeneral = (e: React.FormEvent) => {
@@ -52,13 +51,18 @@ export default function ProfilePage() {
     setGeneralMsg(null);
     startTransition(async () => {
       try {
-        await firestoreService.updateUser(user.uid, {
+        const res = await updateSupabaseUserProfile(user.uid, {
           name,
           age: age ? parseInt(age, 10) : null,
-          email: email || undefined,
+          phone: phone || undefined,
         });
-        await refreshProfile();
-        setGeneralMsg({ type: "success", text: "Profile details updated in Cloud Firestore." });
+
+        if (res.success) {
+          await refreshProfile();
+          setGeneralMsg({ type: "success", text: "Profile details updated in Supabase Database." });
+        } else {
+          setGeneralMsg({ type: "error", text: res.error || "Failed to update profile." });
+        }
       } catch (err: any) {
         setGeneralMsg({ type: "error", text: err.message || "Failed to update profile." });
       }
@@ -83,10 +87,6 @@ export default function ProfilePage() {
   if (!user) {
     return null;
   }
-
-  const maskedPhone = user.phoneNumber
-    ? user.phoneNumber.replace(/(\+91\d{2})\d{4}(\d{4})/, "$1 **** $2")
-    : "Mobile Authenticated";
 
   return (
     <div className="py-8 max-w-2xl mx-auto space-y-6 px-4">
@@ -120,28 +120,28 @@ export default function ProfilePage() {
           </div>
           <div className="text-center sm:text-left space-y-1">
             <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
-              <h2 className="text-xl font-bold">{userProfile?.name || "Verified Member"}</h2>
+              <h2 className="text-xl font-bold">{dbUser?.name || user.displayName || "Member"}</h2>
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold tracking-wide uppercase bg-brand-500/20 text-brand-300 border border-brand-400/30">
-                {userProfile?.role || "CUSTOMER"}
+                {dbUser?.role || "CUSTOMER"}
               </span>
             </div>
             <p className="text-xs text-slate-300">
-              {maskedPhone}
+              {user.email || dbUser?.email || user.phoneNumber}
             </p>
             <div className="flex items-center justify-center sm:justify-start gap-3 pt-1 text-[11px] text-emerald-400 font-semibold">
               <span className="flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5" /> Firebase Phone Authenticated
+                <ShieldCheck className="w-3.5 h-3.5" /> Firebase Authenticated
               </span>
               <span>•</span>
               <span className="flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Firestore Synced
+                <CheckCircle2 className="w-3.5 h-3.5" /> Supabase Database Synced
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* 1. DIRECT EDITABLE FIELDS: NAME, AGE & EMAIL */}
+      {/* 1. EDITABLE FIELDS: NAME, AGE & PHONE */}
       <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-glass-sm space-y-4">
         <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
           <div className="flex items-center gap-2">
@@ -150,7 +150,7 @@ export default function ProfilePage() {
               Personal Information
             </h3>
           </div>
-          <span className="text-[11px] font-semibold text-slate-400">Synced to Firestore</span>
+          <span className="text-[11px] font-semibold text-slate-400">Stored in Supabase Database</span>
         </div>
 
         {generalMsg && (
@@ -200,13 +200,13 @@ export default function ProfilePage() {
 
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
-              Email Address (Optional)
+              Mobile Contact Number (Optional)
             </label>
             <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="e.g. yourname@gmail.com"
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="e.g. 9876543210"
               className="w-full px-3.5 py-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500 transition"
             />
           </div>
@@ -224,37 +224,30 @@ export default function ProfilePage() {
         </form>
       </div>
 
-      {/* 2. VERIFIED IDENTITY FIELD: MOBILE NUMBER */}
+      {/* 2. AUTHENTICATION IDENTITY */}
       <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-glass-sm space-y-4">
         <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
           <div className="flex items-center gap-2">
-            <Smartphone className="w-4 h-4 text-emerald-600" />
+            <Mail className="w-4 h-4 text-brand-600" />
             <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-              Verified Mobile Identity
+              Account Login Identity
             </h3>
           </div>
           <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
-            <Lock className="w-3 h-3" /> Firebase Phone Auth
+            <Lock className="w-3 h-3" /> Firebase Auth
           </span>
         </div>
 
-        <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200/60 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-              Primary Identity Phone
-            </span>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                {user.phoneNumber || "No mobile number linked"}
-              </span>
-              <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Active Session
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-500">
-              Tied directly to your Firebase Authentication & Firestore booking reservations.
-            </p>
-          </div>
+        <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200/60 dark:border-slate-700 space-y-1">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            Registered Email
+          </span>
+          <p className="text-sm font-bold text-slate-900 dark:text-slate-100">
+            {user.email || "No email on record"}
+          </p>
+          <p className="text-[11px] text-slate-500 pt-1">
+            Secured by Firebase Authentication.
+          </p>
         </div>
       </div>
 
@@ -273,9 +266,9 @@ export default function ProfilePage() {
         <div className="flex items-center justify-between p-4">
           <div className="flex items-center gap-3">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <span className="text-slate-800 dark:text-slate-200">Firebase UID: {user.uid.slice(0, 13)}...</span>
+            <span className="text-slate-800 dark:text-slate-200">Supabase User ID: {dbUser?.id?.slice(0, 13) || user.uid.slice(0, 13)}...</span>
           </div>
-          <span className="text-[11px] font-mono text-slate-400">{userProfile?.status || "ACTIVE"}</span>
+          <span className="text-[11px] font-mono text-slate-400">{dbUser?.status || "ACTIVE"}</span>
         </div>
       </div>
     </div>

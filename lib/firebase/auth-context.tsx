@@ -1,48 +1,71 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { User, onAuthStateChanged, signOut as firebaseSignOut } from "firebase/auth";
+import { User, onAuthStateChanged } from "firebase/auth";
 import { auth } from "./client";
-import { firestoreService, FirestoreUser } from "./firestore-service";
+import {
+  signUpWithEmail,
+  signInWithEmail,
+  signInWithGoogle,
+  sendPasswordReset,
+  signOutUser,
+  AuthResponse,
+} from "./auth-service";
+import { getSupabaseUserProfile, syncFirebaseUserToSupabase } from "@/lib/actions/auth.actions";
 import { useBookingStore } from "@/stores/booking-store";
 
 interface AuthContextType {
   user: User | null;
-  userProfile: FirestoreUser | null;
+  dbUser: any | null;
   loading: boolean;
+  signInWithEmail: (email: string, pass: string) => Promise<AuthResponse>;
+  signUpWithEmail: (email: string, pass: string, name: string, role?: "CUSTOMER" | "VENDOR") => Promise<AuthResponse>;
+  signInWithGoogle: (role?: "CUSTOMER" | "VENDOR") => Promise<AuthResponse>;
+  sendPasswordReset: (email: string) => Promise<{ success: boolean; message?: string; error?: string }>;
   signOut: () => Promise<void>;
-  openPhoneAuth: (context?: "CUSTOMER" | "VENDOR", returnTo?: string) => void;
+  openAuth: (context?: "CUSTOMER" | "VENDOR", returnTo?: string) => void;
   refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
-  userProfile: null,
+  dbUser: null,
   loading: true,
+  signInWithEmail: async () => ({ success: false }),
+  signUpWithEmail: async () => ({ success: false }),
+  signInWithGoogle: async () => ({ success: false }),
+  sendPasswordReset: async () => ({ success: false }),
   signOut: async () => {},
-  openPhoneAuth: () => {},
+  openAuth: () => {},
   refreshProfile: async () => {},
 });
 
 export function FirebaseAuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [userProfile, setUserProfile] = useState<FirestoreUser | null>(null);
+  const [dbUser, setDbUser] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
 
   const { openAuthModal } = useBookingStore();
 
   const fetchProfile = async (firebaseUser: User) => {
     try {
-      let profile = await firestoreService.getUser(firebaseUser.uid);
-      if (!profile) {
-        profile = await firestoreService.syncUser({
+      let res = await getSupabaseUserProfile(firebaseUser.uid);
+      if (!res.success || !res.user) {
+        // Auto-sync into Supabase if not yet recorded
+        const syncRes = await syncFirebaseUserToSupabase({
           uid: firebaseUser.uid,
-          phoneNumber: firebaseUser.phoneNumber,
+          email: firebaseUser.email || `${firebaseUser.uid.slice(0, 8)}@user.thebookmyvenues.in`,
+          name: firebaseUser.displayName || undefined,
+          phone: firebaseUser.phoneNumber || undefined,
         });
+        if (syncRes.success && syncRes.user) {
+          setDbUser(syncRes.user);
+        }
+      } else {
+        setDbUser(res.user);
       }
-      setUserProfile(profile);
     } catch (err) {
-      console.error("[FirebaseAuth] Failed to fetch/sync Firestore profile:", err);
+      console.error("[FirebaseAuth] Failed to sync Supabase user profile:", err);
     }
   };
 
@@ -52,7 +75,7 @@ export function FirebaseAuthProvider({ children }: { children: React.ReactNode }
       if (currentUser) {
         await fetchProfile(currentUser);
       } else {
-        setUserProfile(null);
+        setDbUser(null);
       }
       setLoading(false);
     });
@@ -60,18 +83,42 @@ export function FirebaseAuthProvider({ children }: { children: React.ReactNode }
     return () => unsubscribe();
   }, []);
 
-  const handleSignOut = async () => {
-    try {
-      await firebaseSignOut(auth);
-      setUser(null);
-      setUserProfile(null);
-    } catch (err) {
-      console.error("[FirebaseAuth] Sign out error:", err);
+  const handleSignInWithEmail = async (email: string, pass: string): Promise<AuthResponse> => {
+    const res = await signInWithEmail(email, pass);
+    if (res.success && res.user) {
+      setUser(res.user);
+      if (res.dbUser) setDbUser(res.dbUser);
     }
+    return res;
   };
 
-  const handleOpenPhoneAuth = (context: "CUSTOMER" | "VENDOR" = "CUSTOMER", returnTo?: string) => {
-    openAuthModal(context, returnTo);
+  const handleSignUpWithEmail = async (
+    email: string,
+    pass: string,
+    name: string,
+    role: "CUSTOMER" | "VENDOR" = "CUSTOMER"
+  ): Promise<AuthResponse> => {
+    const res = await signUpWithEmail(email, pass, name, role);
+    if (res.success && res.user) {
+      setUser(res.user);
+      if (res.dbUser) setDbUser(res.dbUser);
+    }
+    return res;
+  };
+
+  const handleSignInWithGoogle = async (role: "CUSTOMER" | "VENDOR" = "CUSTOMER"): Promise<AuthResponse> => {
+    const res = await signInWithGoogle(role);
+    if (res.success && res.user) {
+      setUser(res.user);
+      if (res.dbUser) setDbUser(res.dbUser);
+    }
+    return res;
+  };
+
+  const handleSignOut = async () => {
+    await signOutUser();
+    setUser(null);
+    setDbUser(null);
   };
 
   const refreshProfile = async () => {
@@ -84,10 +131,14 @@ export function FirebaseAuthProvider({ children }: { children: React.ReactNode }
     <AuthContext.Provider
       value={{
         user,
-        userProfile,
+        dbUser,
         loading,
+        signInWithEmail: handleSignInWithEmail,
+        signUpWithEmail: handleSignUpWithEmail,
+        signInWithGoogle: handleSignInWithGoogle,
+        sendPasswordReset,
         signOut: handleSignOut,
-        openPhoneAuth: handleOpenPhoneAuth,
+        openAuth: openAuthModal,
         refreshProfile,
       }}
     >

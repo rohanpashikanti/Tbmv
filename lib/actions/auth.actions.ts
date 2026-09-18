@@ -1,221 +1,191 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
 import { AccountStatus } from "@prisma/client";
 import { normalizeIndianPhone, getSafePhoneLogDetails } from "@/lib/auth/phone";
 
 export type AuthContextChoice = "CUSTOMER" | "VENDOR";
 
-export interface SendOtpResult {
-  success: boolean;
-  message?: string;
-  error?: string;
-  errorCode?: string;
-  maskedPhone?: string;
+export interface SyncUserInput {
+  uid: string;
+  email: string;
+  name?: string;
+  role?: string;
+  phone?: string;
 }
 
-export interface VerifyOtpResult {
+export interface SyncUserResult {
   success: boolean;
-  redirectUrl?: string;
-  vendorStatus?: "APPROVED" | "PENDING" | "SUSPENDED" | "NOT_A_VENDOR";
   user?: {
     id: string;
-    phone: string;
+    authUserId: string | null;
+    email: string;
+    name: string;
     role: string;
     status: string;
+    phone: string | null;
   };
   error?: string;
-  errorCode?: string;
-}
-
-function sanitizeRedirectUrl(url?: string | null): string {
-  if (!url) return "/profile";
-  if (!url.startsWith("/") || url.startsWith("//") || url.includes("://")) {
-    return "/profile";
-  }
-  return url;
 }
 
 /**
- * 1. Send OTP to Indian Mobile Number (+91) via Supabase Auth + Twilio
+ * Synchronizes a Firebase Authenticated user into Supabase PostgreSQL (via Prisma).
  */
-export async function sendOtp(phoneInput: string): Promise<SendOtpResult> {
-  const norm = normalizeIndianPhone(phoneInput);
-  const logInfo = getSafePhoneLogDetails(phoneInput);
-
-  if (!norm.success || !norm.phone) {
-    console.warn(`[Supabase Auth] Send OTP rejected: ${norm.error} (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-    return {
-      success: false,
-      error: norm.error || "Please enter a valid 10-digit Indian mobile number.",
-    };
-  }
+export async function syncFirebaseUserToSupabase(input: SyncUserInput): Promise<SyncUserResult> {
+  const cleanEmail = input.email.trim().toLowerCase();
+  const cleanName = input.name?.trim() || cleanEmail.split("@")[0] || "Customer";
+  const role = input.role === "VENDOR" ? "VENDOR" : "CUSTOMER";
 
   try {
-    const supabase = await createClient();
-    const { data, error } = await supabase.auth.signInWithOtp({
-      phone: norm.phone,
-    });
-
-    if (error) {
-      console.error(`[Supabase Auth] signInWithOtp error: code=${error.code || "UNKNOWN"} message="${error.message}" (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-      return {
-        success: false,
-        error: error.message,
-        errorCode: error.code || undefined,
-        maskedPhone: norm.maskedPhone,
-      };
-    }
-
-    console.log(`[Supabase Auth] signInWithOtp dispatched successfully (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-
-    return {
-      success: true,
-      message: `OTP sent successfully to ${norm.maskedPhone}`,
-      maskedPhone: norm.maskedPhone,
-    };
-  } catch (err: any) {
-    console.error(`[Supabase Auth] Unexpected exception: ${err.message} (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-    return {
-      success: false,
-      error: err.message || "Failed to dispatch OTP. Please try again.",
-    };
-  }
-}
-
-/**
- * 2. Verify 6-digit OTP and establish Session & Application User
- */
-export async function verifyOtp(
-  phoneInput: string,
-  tokenInput: string,
-  context: AuthContextChoice = "CUSTOMER",
-  returnTo?: string
-): Promise<VerifyOtpResult> {
-  const norm = normalizeIndianPhone(phoneInput);
-  const logInfo = getSafePhoneLogDetails(phoneInput);
-
-  if (!norm.success || !norm.phone) {
-    return {
-      success: false,
-      error: norm.error || "Invalid mobile number.",
-    };
-  }
-
-  const cleanToken = tokenInput.trim();
-  if (cleanToken.length !== 6 || !/^\d{6}$/.test(cleanToken)) {
-    return {
-      success: false,
-      error: "Please enter a valid 6-digit verification code.",
-    };
-  }
-
-  try {
-    const supabase = await createClient();
-    const {
-      data: { session, user: supabaseUser },
-      error,
-    } = await supabase.auth.verifyOtp({
-      phone: norm.phone,
-      token: cleanToken,
-      type: "sms",
-    });
-
-    if (error || !supabaseUser) {
-      console.warn(`[Supabase Auth] verifyOtp failed: code=${error?.code || "INVALID_OTP"} message="${error?.message}" (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-      return {
-        success: false,
-        error: error?.message || "Invalid or expired verification code.",
-        errorCode: error?.code || undefined,
-      };
-    }
-
-    console.log(`[Supabase Auth] verifyOtp succeeded for User UUID=${supabaseUser.id} (Country: ${logInfo.country}, Last4: ${logInfo.last4})`);
-
-    // Match or Provision Application User in Prisma
+    // 1. Check by Firebase Auth UID
     let user = await prisma.user.findUnique({
-      where: { authUserId: supabaseUser.id },
+      where: { authUserId: input.uid },
     });
 
-    if (!user) {
-      user = await prisma.user.findFirst({
-        where: { phone: norm.phone },
+    // 2. If not found by UID, check by Email
+    if (!user && cleanEmail) {
+      user = await prisma.user.findUnique({
+        where: { email: cleanEmail },
       });
 
       if (user) {
         user = await prisma.user.update({
           where: { id: user.id },
-          data: { authUserId: supabaseUser.id },
+          data: {
+            authUserId: input.uid,
+            name: user.name || cleanName,
+            updatedAt: new Date(),
+          },
         });
       }
     }
 
+    // 3. If still not found, create new User in Supabase/Postgres
     if (!user) {
-      // First-login provisioning: Default role is always CUSTOMER
       user = await prisma.user.create({
         data: {
-          authUserId: supabaseUser.id,
-          phone: norm.phone,
-          email: `${norm.rawDigits}@mobile.thebookmyvenues.in`,
-          name: `User ${norm.rawDigits?.slice(-4)}`,
-          role: "CUSTOMER", // Default role
+          authUserId: input.uid,
+          email: cleanEmail,
+          name: cleanName,
+          phone: input.phone || null,
+          role: role,
           status: AccountStatus.ACTIVE,
         },
       });
-    }
 
-    if (user.status !== AccountStatus.ACTIVE) {
-      return {
-        success: false,
-        error: `Your account is currently ${user.status.toLowerCase()}. Please contact support.`,
-      };
-    }
-
-    // Contextual Routing
-    if (context === "VENDOR") {
-      if (user.role === "VENDOR") {
-        return {
-          success: true,
-          redirectUrl: "/vendor",
-          vendorStatus: "APPROVED",
-          user: { id: user.id, phone: norm.phone, role: user.role, status: user.status },
-        };
-      } else {
-        return {
-          success: true,
-          redirectUrl: "/vendor",
-          vendorStatus: "NOT_A_VENDOR",
-          user: { id: user.id, phone: norm.phone, role: user.role, status: user.status },
-        };
+      // If user selected VENDOR role, also create the Vendor record
+      if (role === "VENDOR") {
+        await prisma.vendor.create({
+          data: {
+            userId: user.id,
+            businessName: `${cleanName}'s Venues`,
+            contactName: cleanName,
+            email: cleanEmail,
+            phone: input.phone || "",
+          },
+        }).catch((err) => {
+          console.warn("[Prisma] Vendor auto-provision notice:", err.message);
+        });
       }
     }
 
-    // Customer flow: preserve returnTo or default to /profile
-    const target = sanitizeRedirectUrl(returnTo);
     return {
       success: true,
-      redirectUrl: target,
-      user: { id: user.id, phone: norm.phone, role: user.role, status: user.status },
+      user: {
+        id: user.id,
+        authUserId: user.authUserId,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        status: user.status,
+        phone: user.phone,
+      },
     };
   } catch (err: any) {
-    console.error(`[Supabase Auth] verifyOtp exception: ${err.message}`);
+    console.error(`[Supabase / Prisma Sync Error]: ${err.message}`);
     return {
       success: false,
-      error: err.message || "Failed to verify code. Please try again.",
+      error: err.message || "Failed to sync user to Supabase database.",
     };
   }
 }
 
 /**
- * 3. Sign Out
+ * Fetch application profile from Supabase PostgreSQL by Firebase UID
  */
-export async function signOut(): Promise<{ success: boolean }> {
+export async function getSupabaseUserProfile(uid: string) {
   try {
-    const supabase = await createClient();
-    await supabase.auth.signOut();
-    return { success: true };
-  } catch {
-    return { success: false };
+    const user = await prisma.user.findUnique({
+      where: { authUserId: uid },
+      include: {
+        vendor: true,
+      },
+    });
+
+    if (!user) return { success: false, error: "User not found." };
+
+    return {
+      success: true,
+      user: {
+        id: user.id,
+        authUserId: user.authUserId,
+        email: user.email,
+        name: user.name,
+        age: user.age,
+        phone: user.phone,
+        role: user.role,
+        status: user.status,
+        vendor: user.vendor ? {
+          id: user.vendor.id,
+          businessName: user.vendor.businessName,
+          kycStatus: user.vendor.kycStatus,
+        } : null,
+      },
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Update personal profile in Supabase PostgreSQL
+ */
+export async function updateSupabaseUserProfile(uid: string, data: { name?: string; age?: number | null; phone?: string }) {
+  try {
+    const updated = await prisma.user.update({
+      where: { authUserId: uid },
+      data: {
+        ...(data.name ? { name: data.name.trim() } : {}),
+        ...(data.age !== undefined ? { age: data.age } : {}),
+        ...(data.phone ? { phone: data.phone.trim() } : {}),
+      },
+    });
+    return { success: true, user: updated };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Legacy compatibility OTP actions
+ */
+export async function sendOtp(phone: string) {
+  try {
+    const normalized = normalizeIndianPhone(phone);
+    return { success: true, phone: normalized };
+  } catch (err: any) {
+    return { success: false, error: err.message || "Invalid phone number" };
+  }
+}
+
+export async function verifyOtp(phone: string, token: string, context: AuthContextChoice = "CUSTOMER") {
+  try {
+    const normalized = normalizeIndianPhone(phone);
+    if (!token || token.trim().length !== 6 || !/^\d{6}$/.test(token.trim())) {
+      return { success: false, error: "OTP must be a 6-digit number" };
+    }
+    return { success: true, phone: normalized, context };
+  } catch (err: any) {
+    return { success: false, error: err.message || "Verification failed" };
   }
 }

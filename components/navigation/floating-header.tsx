@@ -20,12 +20,12 @@ import { CITIES } from "@/lib/mock-data";
 
 export function FloatingHeader() {
   const { selectedCity, setSelectedCity, setSearchModalOpen, openAuthModal } = useBookingStore();
-  const { user, userProfile, signOut } = useFirebaseAuth();
+  const { user, dbUser, signOut } = useFirebaseAuth();
   const [isCityDropdownOpen, setIsCityDropdownOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
 
-  const displayPhone = user?.phoneNumber || userProfile?.phoneNumber || "My Account";
-  const displayName = userProfile?.name || "Member";
+  const displayPhone = user?.email || dbUser?.email || user?.phoneNumber || "My Account";
+  const displayName = dbUser?.name || user?.displayName || "Member";
 
   return (
     <header className="sticky top-0 z-40 w-full px-4 sm:px-6 lg:px-8 pt-3 pb-2 transition-all">
