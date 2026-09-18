@@ -1,0 +1,286 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum BookingStatus {
+  PENDING
+  HELD
+  PAYMENT_PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  CREATED
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum SlotState {
+  AVAILABLE
+  HELD
+  BOOKED
+  BLOCKED
+  EXPIRED
+  CANCELLED
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model User {
+  id          String        @id @default(uuid())
+  authUserId  String?       @unique
+  email       String        @unique
+  name        String
+  age         Int?
+  phone       String?
+  role        String        @default("CUSTOMER") // CUSTOMER, VENDOR, ADMIN
+  status      AccountStatus @default(ACTIVE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  bookings  Booking[]
+  holds     BookingHold[]
+
+  @@index([email])
+  @@index([phone])
+}
+
+model Venue {
+  id              String               @id @default(uuid())
+  slug            String               @unique
+  name            String
+  tagline         String?
+  description     String
+  category        String               // cricket, football, private-theatre, etc.
+  address         String
+  city            String
+  neighborhood    String
+  distanceKm      Float                @default(0.0)
+  latitude        Float?
+  longitude       Float?
+  timezone        String               @default("Asia/Kolkata")
+  rating          Float                @default(5.0)
+  reviewCount     Int                  @default(0)
+  startingPrice   Decimal              @db.Decimal(10, 2)
+  priceUnit       String               @default("hour")
+  isAvailableToday Boolean             @default(true)
+  isPopular       Boolean              @default(false)
+  isTrending      Boolean              @default(false)
+  images          String[]
+  amenities       Json                 // Array of { id, name, icon }
+  rules           String[]
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  resources       VenueResource[]
+  blockedPeriods  VenueBlockedPeriod[]
+  bookings        Booking[]
+
+  @@index([city])
+  @@index([category])
+  @@index([slug])
+}
+
+model VenueResource {
+  id               String               @id @default(uuid())
+  venueId          String
+  name             String               // e.g., "Box Turf #01", "Diamond Screen"
+  category         String
+  capacity         Int?
+  basePricePerHour Decimal              @db.Decimal(10, 2)
+  isActive         Boolean              @default(true)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  venue            Venue                @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  slots            ResourceSlot[]
+  bookingItems     BookingItem[]
+  holds            BookingHold[]
+  blockedPeriods   VenueBlockedPeriod[]
+
+  @@index([venueId])
+  @@index([category])
+}
+
+model ResourceSlot {
+  id          String        @id @default(uuid())
+  resourceId  String
+  date        String        // YYYY-MM-DD
+  startTime   String        // HH:mm (e.g. "09:00")
+  endTime     String        // HH:mm (e.g. "10:00")
+  startUtc    DateTime?     // Canonical UTC start timestamp
+  endUtc      DateTime?     // Canonical UTC end timestamp
+  timeOfDay   String        // morning, afternoon, evening, night
+  price       Decimal       @db.Decimal(10, 2)
+  status      SlotState     @default(AVAILABLE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  resource    VenueResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceId, date, startTime, endTime])
+  @@index([resourceId, date])
+  @@index([status])
+}
+
+model BookingHold {
+  id          String        @id @default(uuid())
+  holdKey     String        @unique // Collision-safe lock key e.g. hold:res-1:2026-09-18:0900
+  venueId     String
+  resourceId  String
+  userId      String?
+  date        String        // YYYY-MM-DD
+  slotIds     String[]
+  startTimes  String[]
+  endTimes    String[]
+  startUtc    DateTime?     // Canonical UTC start timestamp
+  endUtc      DateTime?     // Canonical UTC end timestamp
+  totalAmount Decimal       @db.Decimal(10, 2)
+  status      String        @default("ACTIVE") // ACTIVE, CONSUMED, EXPIRED, RELEASED
+  expiresAt   DateTime
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  resource    VenueResource @relation(fields: [resourceId], references: [id])
+  user        User?         @relation(fields: [userId], references: [id])
+  booking     Booking?
+
+  @@index([resourceId, date])
+  @@index([expiresAt])
+  @@index([status])
+}
+
+model Booking {
+  id              String        @id @default(uuid())
+  bookingNumber   String        @unique // e.g., TBV-948201
+  holdId          String?       @unique
+  venueId         String
+  userId          String?
+  customerName    String
+  customerPhone   String
+  customerEmail   String
+  totalAmount     Decimal       @db.Decimal(10, 2)
+  currency        String        @default("INR")
+  status          BookingStatus @default(CONFIRMED)
+  idempotencyKey  String?       @unique
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  venue           Venue         @relation(fields: [venueId], references: [id])
+  user            User?         @relation(fields: [userId], references: [id])
+  hold            BookingHold?  @relation(fields: [holdId], references: [id])
+  items           BookingItem[]
+  payments        Payment[]
+  events          BookingEvent[]
+
+  @@index([venueId])
+  @@index([userId])
+  @@index([status])
+  @@index([idempotencyKey])
+}
+
+model BookingItem {
+  id          String        @id @default(uuid())
+  bookingId   String
+  resourceId  String
+  date        String        // YYYY-MM-DD
+  startTime   String        // HH:mm (e.g. "09:00")
+  endTime     String        // HH:mm (e.g. "11:00")
+  startUtc    DateTime      // Exact UTC start timestamp
+  endUtc      DateTime      // Exact UTC end timestamp
+  price       Decimal       @db.Decimal(10, 2)
+  createdAt   DateTime      @default(now())
+
+  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  resource    VenueResource @relation(fields: [resourceId], references: [id])
+
+  // Compound unique fallback and indexes
+  // NOTE: PostgreSQL EXCLUDE USING gist (resourceId WITH =, tsrange(startUtc, endUtc, '[)') WITH &&)
+  // is applied via PostgreSQL migration to guarantee zero arbitrary overlapping intervals.
+  @@index([resourceId, date])
+  @@index([bookingId])
+  @@index([resourceId, startUtc, endUtc])
+}
+
+model Payment {
+  id                String        @id @default(uuid())
+  bookingId         String
+  externalOrderId   String?       @unique
+  externalPaymentId String?       @unique
+  amount            Decimal       @db.Decimal(10, 2)
+  currency          String        @default("INR")
+  status            PaymentStatus @default(CREATED)
+  provider          String        @default("mock") // razorpay, stripe, mock
+  signatureVerified Boolean       @default(false)
+  rawResponse       Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking           Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([externalPaymentId])
+  @@index([status])
+}
+
+model VenueBlockedPeriod {
+  id          String        @id @default(uuid())
+  venueId     String
+  resourceId  String?
+  startDate   DateTime
+  endDate     DateTime
+  reason      String
+  createdAt   DateTime      @default(now())
+
+  venue       Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  resource    VenueResource? @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([venueId, startDate, endDate])
+}
+
+model BookingEvent {
+  id          String    @id @default(uuid())
+  bookingId   String
+  eventType   String    // HOLD_CREATED, PAYMENT_SUCCESS, BOOKING_CONFIRMED, CANCELLED
+  payload     Json
+  createdAt   DateTime  @default(now())
+
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([eventType])
+}
+
+model IdempotencyRecord {
+  key         String    @id // Client supplied Idempotency-Key
+  action      String    // e.g. "CONFIRM_BOOKING"
+  requestHash String    // SHA-256 hash of payload to detect conflicts
+  response    Json
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+model ProcessedWebhookEvent {
+  eventId     String    @id // Unique Provider Event ID
+  provider    String    // razorpay, stripe
+  processedAt DateTime  @default(now())
+}
