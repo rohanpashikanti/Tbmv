@@ -2,14 +2,19 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
-import { MapPin, Search, Sparkles, ChevronDown, Bell, Mic } from "lucide-react";
+import { MapPin, Search, Sparkles, ChevronDown, Mic } from "lucide-react";
 import { useBookingStore } from "@/stores/booking-store";
 import { CITIES } from "@/lib/mock-data";
+import {
+  Show,
+  SignInButton,
+  SignUpButton,
+  UserButton,
+} from "@clerk/nextjs";
 
 export function FloatingHeader() {
-  const { selectedCity, setSelectedCity, setSearchModalOpen, openAuthModal } = useBookingStore();
+  const { selectedCity, setSelectedCity, setSearchModalOpen } = useBookingStore();
   const [isCityDropdownOpen, setIsCityDropdownOpen] = useState(false);
 
   return (
@@ -51,7 +56,7 @@ export function FloatingHeader() {
             </div>
           </button>
 
-          {/* Right Actions: City Selector + Links + Profile */}
+          {/* Right Actions: City Selector + Links + Clerk Auth */}
           <div className="flex items-center gap-3">
             {/* City Selector */}
             <div className="relative">
@@ -97,38 +102,48 @@ export function FloatingHeader() {
               </AnimatePresence>
             </div>
 
-            <button
-              onClick={() => openAuthModal("VENDOR", "/vendor")}
+            <Link
+              href="/vendor"
               className="text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-brand-600 dark:hover:text-brand-400 transition-colors px-2.5 py-1.5"
             >
               List Venue
-            </button>
-
-            <button
-              onClick={() => openAuthModal("CUSTOMER")}
-              className="px-3.5 py-1.5 rounded-2xl bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold shadow-md shadow-brand-500/20 transition-all"
-            >
-              Sign In
-            </button>
-
-            {/* Profile Avatar with Next Image */}
-            <Link href="/profile" className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-indigo-500 to-purple-600 p-[1.5px] cursor-pointer shadow-sm relative block">
-              <div className="w-full h-full rounded-2xl bg-white dark:bg-slate-900 flex items-center justify-center overflow-hidden relative">
-                <Image
-                  src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"
-                  alt="User profile"
-                  fill
-                  sizes="36px"
-                  className="object-cover"
-                />
-              </div>
             </Link>
+
+            {/* Clerk Authentication Controls using <Show> */}
+            <Show when="signed-out">
+              <SignInButton mode="modal">
+                <button className="text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-brand-600 px-3 py-1.5">
+                  Sign In
+                </button>
+              </SignInButton>
+              <SignUpButton mode="modal">
+                <button className="px-3.5 py-1.5 rounded-2xl bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold shadow-md shadow-brand-500/20 transition-all">
+                  Sign Up
+                </button>
+              </SignUpButton>
+            </Show>
+
+            <Show when="signed-in">
+              <Link
+                href="/bookings"
+                className="text-xs font-semibold text-slate-600 hover:text-brand-600 px-2 py-1"
+              >
+                My Bookings
+              </Link>
+              <UserButton
+                appearance={{
+                  elements: {
+                    avatarBox: "w-9 h-9 rounded-2xl ring-2 ring-brand-500/20",
+                  },
+                }}
+              />
+            </Show>
           </div>
         </div>
 
         {/* MOBILE HEADER */}
         <div className="flex md:hidden flex-col gap-2.5">
-          {/* Top Bar: Location & Avatar */}
+          {/* Top Bar: Location & Avatar / Auth */}
           <div className="flex items-center justify-between">
             <div>
               <div className="relative inline-block">
@@ -170,7 +185,7 @@ export function FloatingHeader() {
                 </AnimatePresence>
               </div>
               <p className="text-[11px] text-slate-400 font-medium">
-                Good morning ☀️
+                Welcome to TheBookMyVenues ✨
               </p>
             </div>
 
@@ -181,17 +196,24 @@ export function FloatingHeader() {
               >
                 <Sparkles className="w-4 h-4" />
               </button>
-              <Link href="/profile" className="w-9 h-9 rounded-full bg-gradient-to-tr from-brand-600 to-purple-600 p-[1.5px] relative block">
-                <div className="w-full h-full rounded-full overflow-hidden relative">
-                  <Image
-                    src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"
-                    alt="User profile"
-                    fill
-                    sizes="36px"
-                    className="object-cover"
-                  />
-                </div>
-              </Link>
+
+              <Show when="signed-out">
+                <SignInButton mode="modal">
+                  <button className="px-3 py-1 rounded-xl bg-brand-600 text-white text-xs font-bold shadow-sm">
+                    Sign In
+                  </button>
+                </SignInButton>
+              </Show>
+
+              <Show when="signed-in">
+                <UserButton
+                  appearance={{
+                    elements: {
+                      avatarBox: "w-8 h-8 rounded-full",
+                    },
+                  }}
+                />
+              </Show>
             </div>
           </div>
 

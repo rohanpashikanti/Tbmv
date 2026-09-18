@@ -1,30 +1,25 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/utils/supabase/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
-import { getSupabaseConfig } from "@/lib/supabase/env";
 
 export async function GET() {
-  const config = getSupabaseConfig();
-
-  let supabaseSession = null;
-  let supabaseAuthUser = null;
+  let clerkAuthUser = null;
   let applicationUser = null;
 
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const { userId } = await auth();
 
-    if (user) {
-      supabaseAuthUser = {
-        id: user.id,
-        phone: user.phone,
-        email: user.email,
+    if (userId) {
+      const clerkUser = await currentUser();
+      clerkAuthUser = {
+        id: userId,
+        email: clerkUser?.emailAddresses?.[0]?.emailAddress,
+        phone: clerkUser?.phoneNumbers?.[0]?.phoneNumber,
+        name: [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" "),
       };
 
       const appUser = await prisma.user.findUnique({
-        where: { authUserId: user.id },
+        where: { authUserId: userId },
       });
 
       if (appUser) {
@@ -43,14 +38,10 @@ export async function GET() {
 
   return NextResponse.json({
     status: "ok",
-    supabase: {
-      configured: config.isConfigured,
-      projectUrl: config.url,
-      clientKeyType: "PUBLISHABLE",
-    },
+    authProvider: "Clerk",
     session: {
-      authenticated: Boolean(supabaseAuthUser),
-      supabaseUser: supabaseAuthUser,
+      authenticated: Boolean(clerkAuthUser),
+      user: clerkAuthUser,
       applicationUser,
     },
     timestamp: new Date().toISOString(),

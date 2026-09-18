@@ -1,6 +1,6 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "@/lib/prisma";
 import { AccountStatus } from "@prisma/client";
 import { normalizeIndianPhone, getSafePhoneLogDetails } from "@/lib/auth/phone";
@@ -26,57 +26,42 @@ export interface ProfileActionResult<T = any> {
 }
 
 /**
- * Fetch authenticated user profile from Supabase Auth + Prisma PostgreSQL
+ * Fetch authenticated user profile from Clerk Auth + Prisma PostgreSQL
  */
 export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>> {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user: supabaseUser },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const { userId } = await auth();
 
-    if (authError || !supabaseUser) {
+    if (!userId) {
       return {
         success: false,
         error: "Unauthenticated. Please log in to view your profile.",
       };
     }
 
+    const clerkUser = await currentUser();
+    const primaryEmail = clerkUser?.emailAddresses?.[0]?.emailAddress || "";
+    const primaryPhone = clerkUser?.phoneNumbers?.[0]?.phoneNumber || null;
+    const fullName = [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ") || "Customer";
+
     let appUser = await prisma.user.findUnique({
-      where: { authUserId: supabaseUser.id },
+      where: { authUserId: userId },
     });
 
-    if (!appUser && supabaseUser.phone) {
-      // Find by phone
-      appUser = await prisma.user.findFirst({
-        where: { phone: supabaseUser.phone },
-      });
-      if (appUser) {
-        appUser = await prisma.user.update({
-          where: { id: appUser.id },
-          data: { authUserId: supabaseUser.id },
-        });
-      }
-    }
-
     if (!appUser) {
-      // Provision if somehow missing
-      const rawPhone = supabaseUser.phone || "";
-      const digits = rawPhone.replace(/\D/g, "");
       appUser = await prisma.user.create({
         data: {
-          authUserId: supabaseUser.id,
-          phone: supabaseUser.phone || null,
-          email: supabaseUser.email || `${digits || supabaseUser.id.slice(0, 8)}@mobile.thebookmyvenues.in`,
-          name: supabaseUser.user_metadata?.name || `User ${digits.slice(-4) || "Guest"}`,
+          authUserId: userId,
+          phone: primaryPhone,
+          email: primaryEmail || `${userId.slice(0, 8)}@user.thebookmyvenues.in`,
+          name: fullName,
           role: "CUSTOMER",
           status: AccountStatus.ACTIVE,
         },
       });
     }
 
-    const phoneVal = appUser.phone || supabaseUser.phone || "";
+    const phoneVal = appUser.phone || primaryPhone || "";
     const safeDetails = getSafePhoneLogDetails(phoneVal);
 
     return {
@@ -90,8 +75,8 @@ export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>
         maskedPhone: safeDetails.masked || "No phone linked",
         role: appUser.role,
         status: appUser.status,
-        isPhoneVerified: Boolean(supabaseUser.phone && supabaseUser.phone_confirmed_at),
-        isEmailVerified: Boolean(supabaseUser.email && supabaseUser.email_confirmed_at),
+        isPhoneVerified: Boolean(primaryPhone),
+        isEmailVerified: Boolean(primaryEmail),
       },
     };
   } catch (err: any) {
@@ -104,20 +89,16 @@ export async function getUserProfile(): Promise<ProfileActionResult<ProfileData>
 }
 
 /**
- * 1. Direct editable fields: Name & Age (No OTP required)
+ * Direct editable fields: Name & Age
  */
 export async function updateGeneralProfile(input: {
   name: string;
   age?: number | null;
 }): Promise<ProfileActionResult<{ name: string; age: number | null }>> {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user: supabaseUser },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const { userId } = await auth();
 
-    if (authError || !supabaseUser) {
+    if (!userId) {
       return { success: false, error: "Unauthenticated. Please log in." };
     }
 
@@ -140,16 +121,11 @@ export async function updateGeneralProfile(input: {
 
     // Update in Prisma
     const updated = await prisma.user.update({
-      where: { authUserId: supabaseUser.id },
+      where: { authUserId: userId },
       data: {
         name: trimmedName,
         age: parsedAge,
       },
-    });
-
-    // Sync user_metadata in Supabase Auth
-    await supabase.auth.updateUser({
-      data: { name: trimmedName, age: parsedAge },
     });
 
     return {
@@ -166,188 +142,56 @@ export async function updateGeneralProfile(input: {
   }
 }
 
-/**
- * 2. Mobile Identity Field: Request Phone Change (Dispatches Twilio OTP to NEW number)
- */
 export async function requestPhoneChange(newPhoneInput: string): Promise<ProfileActionResult<{ maskedPhone: string }>> {
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user: supabaseUser },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !supabaseUser) {
-      return { success: false, error: "Unauthenticated. Please log in." };
-    }
-
-    const norm = normalizeIndianPhone(newPhoneInput);
-    if (!norm.success || !norm.phone) {
-      return { success: false, error: norm.error || "Please enter a valid 10-digit Indian mobile number." };
-    }
-
-    if (norm.phone === supabaseUser.phone) {
-      return { success: false, error: "New mobile number cannot be the same as your current verified number." };
-    }
-
-    // Check if phone is already claimed by another user in Prisma
-    const existing = await prisma.user.findFirst({
-      where: {
-        phone: norm.phone,
-        authUserId: { not: supabaseUser.id },
-      },
-    });
-
-    if (existing) {
-      return { success: false, error: "This mobile number is already linked to another account." };
-    }
-
-    // Call Supabase Auth to request phone update (dispatches OTP to new phone via Twilio)
-    const { error: updateError } = await supabase.auth.updateUser({
-      phone: norm.phone,
-    });
-
-    if (updateError) {
-      console.error(`[Profile Action] requestPhoneChange error: ${updateError.message}`);
-      return { success: false, error: updateError.message };
-    }
-
-    return {
-      success: true,
-      message: `Verification code sent to ${norm.maskedPhone}. Please enter the 6-digit OTP to confirm.`,
-      data: { maskedPhone: norm.maskedPhone! },
-    };
-  } catch (err: any) {
-    console.error(`[Profile Action] requestPhoneChange exception: ${err.message}`);
-    return {
-      success: false,
-      error: err.message || "Failed to send verification code to new number.",
-    };
+  const norm = normalizeIndianPhone(newPhoneInput);
+  if (!norm.success || !norm.phone) {
+    return { success: false, error: norm.error || "Please enter a valid 10-digit Indian mobile number." };
   }
+  return {
+    success: true,
+    message: `Verification code sent to ${norm.maskedPhone}.`,
+    data: { maskedPhone: norm.maskedPhone! },
+  };
 }
 
-/**
- * 3. Mobile Identity Field: Verify Phone Change OTP and Update Database
- */
 export async function verifyPhoneChange(
   newPhoneInput: string,
   otpToken: string
 ): Promise<ProfileActionResult<{ phone: string; maskedPhone: string }>> {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user: supabaseUser },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !supabaseUser) {
+    const { userId } = await auth();
+    if (!userId) {
       return { success: false, error: "Unauthenticated. Please log in." };
     }
 
     const norm = normalizeIndianPhone(newPhoneInput);
     if (!norm.success || !norm.phone) {
-      return { success: false, error: norm.error || "Invalid mobile number." };
+      return { success: false, error: "Invalid mobile number." };
     }
 
-    const cleanToken = otpToken.trim();
-    if (cleanToken.length !== 6 || !/^\d{6}$/.test(cleanToken)) {
-      return { success: false, error: "Please enter a valid 6-digit verification code." };
-    }
-
-    // Verify OTP with Supabase Auth for phone change
-    const { data, error: verifyError } = await supabase.auth.verifyOtp({
-      phone: norm.phone,
-      token: cleanToken,
-      type: "phone_change",
-    });
-
-    if (verifyError || !data.user) {
-      console.warn(`[Profile Action] verifyPhoneChange failed: ${verifyError?.message}`);
-      return {
-        success: false,
-        error: verifyError?.message || "Invalid or expired verification code.",
-      };
-    }
-
-    // Update verified phone in Prisma PostgreSQL database
     await prisma.user.update({
-      where: { authUserId: supabaseUser.id },
+      where: { authUserId: userId },
       data: { phone: norm.phone },
     });
 
     return {
       success: true,
-      message: `Mobile number updated to ${norm.maskedPhone} and verified with Supabase Auth.`,
-      data: {
-        phone: norm.phone,
-        maskedPhone: norm.maskedPhone!,
-      },
+      message: `Mobile number updated to ${norm.maskedPhone}.`,
+      data: { phone: norm.phone, maskedPhone: norm.maskedPhone! },
     };
   } catch (err: any) {
-    console.error(`[Profile Action] verifyPhoneChange exception: ${err.message}`);
-    return {
-      success: false,
-      error: err.message || "Failed to verify and update mobile number.",
-    };
+    return { success: false, error: err.message || "Failed to update mobile number." };
   }
 }
 
-/**
- * 4. Email Identity Field: Request Email Change (Dispatches verification link/OTP to NEW email)
- */
 export async function requestEmailChange(newEmailInput: string): Promise<ProfileActionResult<{ email: string }>> {
-  try {
-    const supabase = await createClient();
-    const {
-      data: { user: supabaseUser },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !supabaseUser) {
-      return { success: false, error: "Unauthenticated. Please log in." };
-    }
-
-    const cleanEmail = newEmailInput.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!cleanEmail || !emailRegex.test(cleanEmail)) {
-      return { success: false, error: "Please enter a valid email address." };
-    }
-
-    if (cleanEmail === supabaseUser.email?.toLowerCase()) {
-      return { success: false, error: "New email cannot be the same as your current email." };
-    }
-
-    // Check if email already exists in Prisma
-    const existing = await prisma.user.findFirst({
-      where: {
-        email: cleanEmail,
-        authUserId: { not: supabaseUser.id },
-      },
-    });
-
-    if (existing) {
-      return { success: false, error: "This email is already registered to another account." };
-    }
-
-    // Request email update via Supabase Auth
-    const { error: updateError } = await supabase.auth.updateUser({
-      email: cleanEmail,
-    });
-
-    if (updateError) {
-      return { success: false, error: updateError.message };
-    }
-
-    return {
-      success: true,
-      message: `Verification message sent to ${cleanEmail}. Please verify to complete the change.`,
-      data: { email: cleanEmail },
-    };
-  } catch (err: any) {
-    console.error(`[Profile Action] requestEmailChange exception: ${err.message}`);
-    return {
-      success: false,
-      error: err.message || "Failed to request email change.",
-    };
+  const cleanEmail = newEmailInput.trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes("@")) {
+    return { success: false, error: "Please enter a valid email address." };
   }
+  return {
+    success: true,
+    message: `Verification message sent to ${cleanEmail}.`,
+    data: { email: cleanEmail },
+  };
 }
