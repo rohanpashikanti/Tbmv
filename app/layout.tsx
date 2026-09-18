@@ -6,6 +6,7 @@ import { FloatingHeader } from "@/components/navigation/floating-header";
 import { MobileNavDock } from "@/components/navigation/mobile-nav-dock";
 import { SmartSearchModal } from "@/components/discovery/smart-search-modal";
 import { LoginModal } from "@/components/auth/LoginModal";
+import { FirebasePhoneModal } from "@/components/auth/FirebasePhoneModal";
 
 export const metadata: Metadata = {
   title: "TheBookMyVenues — Premium Venue Discovery & Booking",
@@ -38,6 +39,7 @@ export default function RootLayout({
           <MobileNavDock />
           <SmartSearchModal />
           <LoginModal />
+          <FirebasePhoneModal />
         </ClerkProvider>
       </body>
     </html>
