@@ -14,7 +14,9 @@ import {
   RefreshCw,
   Lock,
 } from "lucide-react";
-import { sendOtp, verifyOtp, AuthContextChoice } from "@/lib/actions/auth.actions";
+import { sendFirebasePhoneOtp, verifyFirebasePhoneOtp } from "@/lib/firebase/phone-auth";
+import { firestoreService } from "@/lib/firebase/firestore-service";
+import { ConfirmationResult } from "firebase/auth";
 
 function sanitizeRedirectUrl(url?: string | null): string {
   if (!url) return "/profile";
@@ -34,13 +36,13 @@ function LoginPageContent() {
 
   const [state, setState] = useState<AuthPageState>("CHOOSER");
   const [phoneNumber, setPhoneNumber] = useState("");
+  const [maskedPhone, setMaskedPhone] = useState("");
   const [otpDigits, setOtpDigits] = useState<string[]>(["", "", "", "", "", ""]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resendTimer, setResendTimer] = useState(30);
   const [canResend, setCanResend] = useState(false);
-  const [successInfo, setSuccessInfo] = useState<{ redirectUrl?: string; vendorStatus?: string } | null>(null);
-  const [maskedNumber, setMaskedNumber] = useState("");
+  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
 
   const otpInputsRef = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -77,23 +79,24 @@ function LoginPageContent() {
     setLoading(true);
     setError(null);
 
-    const res = await sendOtp(phoneNumber);
+    const res = await sendFirebasePhoneOtp(phoneNumber, "recaptcha-page-container");
     setLoading(false);
 
-    if (res.success) {
-      setResendTimer(30);
-      setCanResend(false);
-      setMaskedNumber(res.maskedPhone || `+91 XXXXX ${phoneNumber.slice(-4)}`);
+    if (res.success && res.confirmationResult) {
+      setConfirmationResult(res.confirmationResult);
+      setMaskedPhone(res.maskedPhone || `+91 XXXXX ${phoneNumber.slice(-4)}`);
       if (state === "CUSTOMER_PHONE") {
         setState("CUSTOMER_OTP");
       } else {
         setState("VENDOR_OTP");
       }
+      setResendTimer(30);
+      setCanResend(false);
       setTimeout(() => {
         otpInputsRef.current[0]?.focus();
       }, 150);
     } else {
-      setError(res.error || "Could not dispatch OTP. Please verify your number.");
+      setError(res.error || "Could not dispatch OTP. Please verify your mobile number.");
     }
   };
 
@@ -144,30 +147,34 @@ function LoginPageContent() {
     setLoading(true);
     setError(null);
 
-    const context: AuthContextChoice = state === "VENDOR_OTP" ? "VENDOR" : "CUSTOMER";
-    const res = await verifyOtp(phoneNumber, token, context, returnTo);
-
+    const res = await verifyFirebasePhoneOtp(token, confirmationResult || undefined);
     setLoading(false);
 
-    if (res.success) {
-      setSuccessInfo(res);
+    if (res.success && res.user) {
+      const role = state === "VENDOR_OTP" ? "VENDOR" : "CUSTOMER";
+      await firestoreService.syncUser({
+        uid: res.user.uid,
+        phoneNumber: res.user.phoneNumber,
+      });
+
       setState("SUCCESS");
       setTimeout(() => {
-        if (res.redirectUrl) {
-          router.push(res.redirectUrl);
-          router.refresh();
-        }
-      }, 1600);
+        const target = returnTo || (role === "VENDOR" ? "/vendor" : "/profile");
+        router.push(target);
+        router.refresh();
+      }, 1500);
     } else {
       setError(res.error || "Verification failed. Please double check the code.");
     }
   };
 
-  const isCustomer = state.startsWith("CUSTOMER");
   const isVendor = state.startsWith("VENDOR");
 
   return (
     <div className="min-h-[80vh] flex items-center justify-center p-4">
+      {/* reCAPTCHA Anchor */}
+      <div id="recaptcha-page-container" />
+
       <motion.div
         initial={{ opacity: 0, y: 20, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -209,7 +216,7 @@ function LoginPageContent() {
                   Welcome to TheBookMyVenues
                 </h1>
                 <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                  Choose your path to get started
+                  Choose how you would like to sign in
                 </p>
               </div>
 
@@ -277,7 +284,7 @@ function LoginPageContent() {
 
               <div className="pt-2 text-center text-[11px] text-slate-400 flex items-center justify-center gap-1.5 font-medium">
                 <Lock className="w-3.5 h-3.5" />
-                <span>Secure 256-bit Supabase Mobile OTP Verification</span>
+                <span>Protected by Firebase Phone Authentication</span>
               </div>
             </motion.div>
           )}
@@ -351,7 +358,7 @@ function LoginPageContent() {
                     </>
                   ) : (
                     <>
-                      <span>Send OTP</span>
+                      <span>Send OTP Code</span>
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}
@@ -377,7 +384,7 @@ function LoginPageContent() {
                   Enter the 6-digit code
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                  Code sent to {maskedNumber || `+91 XXXXX ${phoneNumber.slice(-4)}`}
+                  SMS dispatched to {maskedPhone}
                 </p>
               </div>
 
@@ -438,7 +445,7 @@ function LoginPageContent() {
                       setOtpDigits(["", "", "", "", "", ""]);
                       setResendTimer(30);
                       setCanResend(false);
-                      sendOtp(phoneNumber);
+                      sendFirebasePhoneOtp(phoneNumber, "recaptcha-page-container");
                     }}
                     className="text-xs font-bold text-brand-600 hover:text-brand-700 dark:text-brand-400 transition-colors"
                   >
@@ -476,9 +483,7 @@ function LoginPageContent() {
                   You&apos;re all set.
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                  {successInfo?.vendorStatus === "NOT_A_VENDOR"
-                    ? "Signed in as customer. Redirecting..."
-                    : "Identity verified. Redirecting..."}
+                  Firebase Mobile Identity Verified. Redirecting...
                 </p>
               </div>
             </motion.div>

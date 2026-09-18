@@ -4,8 +4,8 @@ export const firebaseConfig = {
   projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "tbmv-8575e",
   storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "tbmv-8575e.firebasestorage.app",
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "106989073378",
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:106989073378:web:717d8fef231261d46fbfbb",
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || "G-H75F8L4981",
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:106989073378:web:2be071aab53ab4056fbfbb",
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || "G-QSBND92RV6",
 };
 
 export function isFirebaseConfigured(): boolean {

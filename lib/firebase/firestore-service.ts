@@ -17,6 +17,7 @@ export interface FirestoreUser {
   phoneNumber: string | null;
   name?: string;
   email?: string;
+  age?: number | null;
   role: "CUSTOMER" | "VENDOR" | "ADMIN";
   status: "ACTIVE" | "SUSPENDED";
   createdAt?: Timestamp;
@@ -54,7 +55,7 @@ export class FirestoreService {
   /**
    * Sync or create user document in Firestore on phone login
    */
-  async syncUser(user: { uid: string; phoneNumber: string | null; name?: string }): Promise<FirestoreUser> {
+  async syncUser(user: { uid: string; phoneNumber: string | null; name?: string; role?: "CUSTOMER" | "VENDOR" }): Promise<FirestoreUser> {
     const userRef = doc(db, "users", user.uid);
     const snap = await getDoc(userRef);
 
@@ -67,7 +68,7 @@ export class FirestoreService {
       uid: user.uid,
       phoneNumber: user.phoneNumber,
       name: user.name || "Guest Customer",
-      role: "CUSTOMER",
+      role: user.role || "CUSTOMER",
       status: "ACTIVE",
     };
 
@@ -78,6 +79,17 @@ export class FirestoreService {
     });
 
     return newUser;
+  }
+
+  /**
+   * Update user document in Firestore
+   */
+  async updateUser(uid: string, data: Partial<FirestoreUser>): Promise<void> {
+    const userRef = doc(db, "users", uid);
+    await updateDoc(userRef, {
+      ...data,
+      updatedAt: serverTimestamp(),
+    });
   }
 
   /**
